@@ -1,9 +1,13 @@
 const express = require("express");
 const app = express();
+const PORT = 3000;
 
+// Middleware Configuration
+app.disable("x-powered-by");
 app.use(express.json());
 
-// Fake "database"
+// --- Data Sources ---
+
 const users = [
   { id: 1, name: "Alice", role: "customer", department: "north" },
   { id: 2, name: "Bob", role: "customer", department: "south" },
@@ -17,48 +21,68 @@ const orders = [
   { id: 4, userId: 2, item: "Keyboard", region: "south", total: 60 },
 ];
 
-// Very simple "authentication" via headers:
-//   X-User-Id: <user id>
-//   (we pretend that real auth already happened)
-function fakeAuth(req, res, next) {
+// --- Authentication Logic ---
+
+// Validates the X-User-Id header to simulate a logged-in session
+const fakeAuth = (req, res, next) => {
   const idHeader = req.header("X-User-Id");
+  
+  // Parse ID safely; defaults to null if header is missing
   const id = idHeader ? parseInt(idHeader, 10) : null;
 
+  // Lookup user in our "database"
   const user = users.find((u) => u.id === id);
+
   if (!user) {
     return res.status(401).json({ error: "Unauthenticated: set X-User-Id" });
   }
 
-  // Attach authenticated user to the request
+  // Attach the found user object to the request for downstream use
   req.user = user;
   next();
-}
+};
 
-// Apply fakeAuth to all routes below this line
+// Enforce authentication globally
 app.use(fakeAuth);
 
-// VULNERABLE endpoint: no ownership check (IDOR)
-app.get("/orders/:id", (req, res) => {
-  const orderId = parseInt(req.params.id, 10);
+// --- Application Routes ---
 
+// Health / Context Check
+app.get("/", (req, res) => {
+  res.json({ 
+    message: "Access Control Tutorial API", 
+    currentUser: req.user 
+  });
+});
+
+/**
+ * SECURE ENDPOINT: Fetch Order by ID
+ * PATCHED: Added ownership verification to prevent IDOR attacks.
+ */
+app.get("/orders/:id", (req, res) => {
+  // Convert param to integer
+  const orderId = parseInt(req.params.id, 10);
+  
+  // 1. Lookup the resource
   const order = orders.find((o) => o.id === orderId);
+
+  // 2. Handle non-existent resources
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
   }
 
-  // BUG: no check that order.userId === req.user.id
-  return res.json(order);
+  // 3. Authorization Check (The Fix)
+  // Ensure the logged-in user actually owns this order.
+  if (order.userId !== req.user.id) {
+    return res.status(403).json({ error: "Forbidden: Access denied" });
+  }
+
+  // 4. Return data if authorized
+  res.json(order);
 });
 
+// --- Server Initialization ---
 
-
-// Health check
-app.get("/", (req, res) => {
-  res.json({ message: "Access Control Tutorial API", currentUser: req.user });
-});
-
-// Start server
-const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
