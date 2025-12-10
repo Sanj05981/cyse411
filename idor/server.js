@@ -1,62 +1,70 @@
 const express = require("express");
-const app = express();
+const server = express();
 const PORT = 3000;
 
-app.disable("x-powered-by");
-app.use(express.json());
+server.disable("x-powered-by");
+server.use(express.json());
 
-const users = [
+// In-memory mock data
+const USERS = [
   { id: 1, name: "Alice", role: "customer", department: "north" },
   { id: 2, name: "Bob", role: "customer", department: "south" },
   { id: 3, name: "Charlie", role: "support", department: "north" },
 ];
 
-const orders = [
+const ORDERS = [
   { id: 1, userId: 1, item: "Laptop", region: "north", total: 2000 },
   { id: 2, userId: 1, item: "Mouse", region: "north", total: 40 },
   { id: 3, userId: 2, item: "Monitor", region: "south", total: 300 },
   { id: 4, userId: 2, item: "Keyboard", region: "south", total: 60 },
 ];
 
-const fakeAuth = (req, res, next) => {
-  const idHeader = req.header("X-User-Id");
-  const id = idHeader ? parseInt(idHeader, 10) : null;
-  const user = users.find((u) => u.id === id);
+// Simple header-based auth middleware
+function authenticate(req, res, next) {
+  const rawId = req.get("X-User-Id");
+  const uid = Number(rawId);
 
-  if (!user) {
-    return res
-      .status(401)
-      .json({ error: "Unauthenticated: set X-User-Id" });
+  const matchedUser = USERS.find((u) => u.id === uid);
+
+  if (!matchedUser) {
+    return res.status(401).json({ error: "Authentication required" });
   }
 
-  req.user = user;
+  req.currentUser = matchedUser;
   next();
-};
+}
 
-app.use(fakeAuth);
+server.use(authenticate);
 
-app.get("/", (req, res) => {
+// Home route for debugging
+server.get("/", (req, res) => {
   res.json({
-    message: "Access Control Tutorial API",
-    currentUser: req.user,
+    status: "API OK",
+    user: req.currentUser,
   });
 });
 
-app.get("/orders/:id", (req, res) => {
-  const orderId = parseInt(req.params.id, 10);
-  const order = orders.find((o) => o.id === orderId);
+// Secure order lookup
+server.get("/orders/:orderId", (req, res) => {
+  const requestedId = Number(req.params.orderId);
 
-  if (!order) {
-    return res.status(404).json({ error: "Order not found" });
+  const orderRecord = ORDERS.find((o) => o.id === requestedId);
+
+  if (!orderRecord) {
+    return res.status(404).json({ error: "Order does not exist" });
   }
 
-  if (order.userId !== req.user.id) {
-    return res.status(403).json({ error: "Forbidden: Access denied" });
+  // Prevent IDOR — users can only view their own orders
+  const userOwnsOrder = orderRecord.userId === req.currentUser.id;
+
+  if (!userOwnsOrder) {
+    return res.status(403).json({ error: "Access forbidden" });
   }
 
-  res.json(order);
+  res.json(orderRecord);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+// Start server
+server.listen(PORT, () => {
+  console.log(`Listening on http://localhost:${PORT}`);
 });
