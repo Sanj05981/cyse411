@@ -1,108 +1,161 @@
 const express = require("express");
-const bodyParser = require("body-parser");
-const cookieParser = require("cookie-parser");
+const parser = require("body-parser");
+const cookies = require("cookie-parser");
 const crypto = require("crypto");
-// bcrypt is installed but NOT used in the vulnerable baseline:
 const bcrypt = require("bcrypt");
 
 const app = express();
 const PORT = 3001;
 
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-app.use(cookieParser());
+
+app.disable("x-powered-by");
+
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "img-src 'self' data:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "frame-ancestors 'none'",
+      "form-action 'self'"
+    ].join("; ")
+  );
+
+  res.setHeader(
+    "Permissions-Policy",
+    [
+      "camera=()",
+      "microphone=()",
+      "geolocation=()",
+      "fullscreen=(self)"
+    ].join(", ")
+  );
+
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  next();
+});
+
+
+app.use(parser.json());
+app.use(parser.urlencoded({ extended: false }));
+app.use(cookies());
 app.use(express.static("public"));
 
-/**
- * VULNERABLE FAKE USER DB
- * For simplicity, we start with a single user whose password is "password123".
- * In the vulnerable version, we hash with a fast hash (SHA-256-like).
- */
-const users = [
+
+const ROUNDS = 10;
+const rawPassword = "password123";
+const hashedPassword = bcrypt.hashSync(rawPassword, ROUNDS);
+
+const ACCOUNTS = [
   {
     id: 1,
     username: "student",
-    // VULNERABLE: fast hash without salt
-    passwordHash: fastHash("password123") // students must replace this scheme with bcrypt
+    secret: hashedPassword
   }
 ];
 
-// In-memory session store
-const sessions = {}; // token -> { userId }
+const ACTIVE_SESSIONS = {}; // token → { userId, expires }
 
-/**
- * VULNERABLE FAST HASH FUNCTION
- * Students MUST STOP using this and replace logic with bcrypt.
- */
-function fastHash(password) {
-  return crypto.createHash("sha256").update(password).digest("hex");
-}
 
-// Helper: find user by username
-function findUser(username) {
-  return users.find((u) => u.username === username);
-}
-
-// Home API just to show who is logged in
-app.get("/api/me", (req, res) => {
+function resolveSession(req) {
   const token = req.cookies.session;
-  if (!token || !sessions[token]) {
+  if (!token || !ACTIVE_SESSIONS[token]) return null;
+
+  const record = ACTIVE_SESSIONS[token];
+
+  if (Date.now() > record.expires) {
+    delete ACTIVE_SESSIONS[token];
+    return null;
+  }
+
+  return record;
+}
+
+
+app.get("/api/me", (req, res) => {
+  const session = resolveSession(req);
+
+  if (!session) {
     return res.status(401).json({ authenticated: false });
   }
-  const session = sessions[token];
-  const user = users.find((u) => u.id === session.userId);
-  res.json({ authenticated: true, username: user.username });
+
+  const user = ACCOUNTS.find((u) => u.id === session.userId);
+  return res.json({
+    authenticated: true,
+    username: user.username
+  });
 });
 
-/**
- * VULNERABLE LOGIN ENDPOINT
- * - Uses fastHash instead of bcrypt
- * - Error messages leak whether username exists
- * - Session token is simple and predictable
- * - Cookie lacks security flags
- */
-app.post("/api/login", (req, res) => {
+// --------------------------
+// POST: Login
+// --------------------------
+app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
-  const user = findUser(username);
 
-  if (!user) {
-    // VULNERABLE: username enumeration via message
-    return res
-      .status(401)
-      .json({ success: false, message: "Unknown username" });
+  const genericResponse = {
+    success: false,
+    message: "Invalid username or password"
+  };
+
+  const account = ACCOUNTS.find((u) => u.username === username);
+  if (!account) {
+    return res.status(401).json(genericResponse);
   }
 
-  const candidateHash = fastHash(password);
-  if (candidateHash !== user.passwordHash) {
-    return res
-      .status(401)
-      .json({ success: false, message: "Wrong password" });
+  const verified = await bcrypt.compare(password, account.secret);
+  if (!verified) {
+    return res.status(401).json(genericResponse);
   }
 
-  // VULNERABLE: predictable token
-  const token = username + "-" + Date.now();
+  const token = crypto.randomUUID();
+  ACTIVE_SESSIONS[token] = {
+    userId: account.id,
+    expires: Date.now() + 60 * 60 * 1000
+  };
 
-  // VULNERABLE: session stored without expiration
-  sessions[token] = { userId: user.id };
-
-  // VULNERABLE: cookie without httpOnly, secure, sameSite
   res.cookie("session", token, {
-    // students must add: httpOnly: true, secure: true, sameSite: "lax"
+    httpOnly: true,
+    secure: false, // set to true for HTTPS environments
+    sameSite: "strict",
+    maxAge: 60 * 60 * 1000
   });
 
-  // Client-side JS (login.html) will store this token in localStorage (vulnerable)
-  res.json({ success: true, token });
+  return res.json({ success: true, token });
 });
 
+// --------------------------
+// POST: Logout
+// --------------------------
 app.post("/api/logout", (req, res) => {
   const token = req.cookies.session;
-  if (token && sessions[token]) {
-    delete sessions[token];
+
+  if (token && ACTIVE_SESSIONS[token]) {
+    delete ACTIVE_SESSIONS[token];
   }
+
   res.clearCookie("session");
-  res.json({ success: true });
+  return res.json({ success: true });
 });
 
+// --------------------------
+// Default Route
+// --------------------------
+app.use((req, res) => {
+  res.status(404).send("Not found");
+});
+
+// --------------------------
+// Server Startup
+// --------------------------
 app.listen(PORT, () => {
-  console.log(`FastBank Auth Lab running at http://localhost:${PORT}`);
+  console.log(`Auth service online at http://localhost:${PORT}`);
 });
